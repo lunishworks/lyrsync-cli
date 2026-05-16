@@ -3,7 +3,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Rust](https://img.shields.io/badge/rust-2026-orange.svg)](https://www.rust-lang.org)
 
-A lightning-fast, zero-friction Rust CLI to fetch, convert, and natively embed word-by-word synchronized eLRC lyrics directly into your local audio files. 
+A *blazingly fast*, zero friction Rust CLI to fetch, convert, and natively embed word-by-word synchronized eLRC lyrics directly into your local audio files. 
 
 Whether you want to scan an entire music library to inject lyrics into FLAC metadata, or just convert a local Musixmatch JSON payload, `lyrsync-cli` handles the heavy lifting safely and automatically.
 

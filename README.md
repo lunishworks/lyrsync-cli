@@ -101,5 +101,5 @@ When embedding is enabled, lyrics are written to native tag formats:
 ## Build
 
 ```bash
-cargo build
+cargo build --release
 ```

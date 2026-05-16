@@ -1,6 +1,6 @@
 [package]
 name = "lyrsync-cli"
-version = "0.1.1s"
+version = "0.1.1"
 edition = "2026"
 
 [dependencies]

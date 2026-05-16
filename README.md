@@ -1,105 +1,88 @@
-# richsync2elrc
+# lyrsync-cli
 
-`richsync2elrc` fetches lyrics from Musixmatch, writes a `.lrc` file next to your song, and can optionally embed lyrics into the audio file.
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![Rust](https://img.shields.io/badge/rust-2026-orange.svg)](https://www.rust-lang.org)
 
-It supports both:
+A lightning-fast, zero-friction Rust CLI to fetch, convert, and natively embed word-by-word synchronized eLRC lyrics directly into your local audio files. 
 
-- **eLRC** (word-by-word karaoke style)
-- **LRC** (line-by-line)
+Whether you want to scan an entire music library to inject lyrics into FLAC metadata, or just convert a local Musixmatch JSON payload, `lyrsync-cli` handles the heavy lifting safely and automatically.
 
-## Quick start (most common commands)
+## ⚡ Prerequisites
 
+To download lyrics directly from the web, `lyrsync-cli` relies on the excellent [musixmatch-cli](https://codeberg.org/ThetaDev/musixmatch-inofficial) backend by ThetaDev. 
+
+You must have it installed and available in your system path to use the `--auto` or `--fetch` flags:
 ```bash
-# 1) Auto mode: scan this folder, fetch lyrics for all songs, save sidecar .lrc files
-richsync2elrc --auto --elrc
-
-# 2) Same as above, but also embed lyrics into audio tags
-richsync2elrc --auto --elrc --embed
-
-# 3) Fetch for all songs in this folder (explicit fetch mode)
-richsync2elrc --fetch --all --lrc
-
-# 4) Fetch by query
-richsync2elrc --fetch "Artist - Song Title" --elrc
+cargo install musixmatch-cli
 ```
 
-## eLRC vs LRC
+## 🚀 Installation
 
-- `--elrc`: prefers richsync (word-level timing). If unavailable, falls back to regular LRC.
-- `--lrc`: prefers standard line-synced subtitles. If unavailable, falls back to richsync converted into regular LRC.
-
-If you do not pass either flag, default is `--elrc`.
-
-## Fetch without renaming files
-
-When fetching from files (`--auto`, `--fetch --all`, `FILE --fetch`, or `--fetch` with one song in folder), the app tries:
-
-1. **Audio metadata first** (`artist` + `title`)
-2. **Filename cleanup fallback** (track number/punctuation/bracket cleanup)
-
-So users usually do **not** need to rename files manually.
-
-## Main usage modes
-
-### 1) Automatic folder pipeline
+Clone the repository and build the optimized release binary:
 
 ```bash
-richsync2elrc --auto --elrc
-```
-
-- Scans current folder for: `.flac`, `.mp3`, `.opus`, `.m4a`, `.wav`, `.ogg`
-- Fetches lyrics
-- Writes sidecar `.lrc`
-- Embeds only if `--embed` is present
-
-`--auto-tag` still works as an alias of `--auto`.
-
-### 2) Fetch mode
-
-```bash
-# Query
-richsync2elrc --fetch "Artist - Title" --lrc
-
-# All songs in current folder
-richsync2elrc --fetch --all --elrc
-
-# Single song file
-richsync2elrc "C:\Music\My Song.flac" --fetch --elrc
-```
-
-You can also run `--fetch` with no query:
-
-- If exactly one supported audio file exists in current folder, it uses that file.
-- If multiple files exist, it asks you to use `--fetch --all` or specify a file/query.
-
-### 3) Local JSON conversion mode
-
-```bash
-# Convert one JSON file
-richsync2elrc song.json --elrc
-
-# Convert all JSON files in current folder
-richsync2elrc --all --lrc
-```
-
-## Embedding details (`--embed`)
-
-When embedding is enabled, lyrics are written to native tag formats:
-
-| Audio format | Tag used |
-| --- | --- |
-| MP3 | ID3v2 (USLT) |
-| FLAC / Opus / Ogg | Vorbis Comments (`LYRICS`) |
-| M4A / MP4 | MP4 ilst (`©lyr`) |
-
-## Useful flags
-
-- `--debug`: extra logs (**works with all modes**, including `--auto` / `--auto-tag` / `--fetch`)
-- `--offset -1.5`: shift generated timestamps (useful when sync feels early/late)
-- `--embed`: write lyrics into audio metadata (in addition to sidecar `.lrc`)
-
-## Build
-
-```bash
+git clone https://github.com/lunishworks/lyrsync-cli.git
+cd lyrsync-cli
 cargo build --release
 ```
+*(The compiled binary will be located in `target/release/lyrsync-cli`)*
+
+## 🛠️ Usage Examples
+
+`lyrsync-cli` defaults to **eLRC** (word-by-word karaoke style timings). If a song only has standard line-by-line lyrics available, it will automatically and safely fall back to standard **LRC**.
+
+### The "Magic Wand" (Auto-Tag a Folder)
+Scans the current directory, reads the ID3/Vorbis tags (or cleans up the filenames if tags are missing), fetches the best available lyrics, saves them as `.lrc` files, and embeds them directly into the audio files.
+```bash
+lyrsync-cli --auto --embed
+```
+
+### Fetch by Query
+Manually search for a specific track and download the `.lrc` file to your current directory.
+```bash
+lyrsync-cli --fetch "Radiohead - Fake Plastic Trees"
+```
+
+### Fetch for a Specific File
+Pass a file path, and the tool will figure out the metadata and fetch the lyrics for it.
+```bash
+lyrsync-cli "C:\Music\Artist - Song.flac" --fetch --embed
+```
+
+### Convert Local JSON
+If you already have a raw Musixmatch richsync JSON payload, you can convert it to eLRC completely offline.
+```bash
+# Convert a single file
+lyrsync-cli track_data.json --embed
+
+# Bulk convert every JSON in the directory
+lyrsync-cli --all
+```
+
+## ⚙️ Core Flags & Options
+
+| Flag | Description |
+| :--- | :--- |
+| `--auto` | Automatically scan, fetch, and process all supported audio files in the folder. |
+| `--fetch` | Search Musixmatch for lyrics. Can be used empty, with `--all`, or with a `"Artist - Title"` query. |
+| `--embed` | Injects the generated lyrics directly into the audio file's native metadata tags. |
+| `--offset <N>`| Shifts all lyric timestamps by N seconds (e.g., `--offset -1.5` or `--offset 2.0`) to fix bad community syncs. |
+| `--lrc` | Forces standard line-synced LRC output, ignoring word-by-word data. |
+| `--debug` | Prints verbose extraction and fallback logic for troubleshooting. |
+
+## 🎧 Supported Audio Formats
+
+When `--embed` is used, `lyrsync-cli` safely writes to the exact metadata format expected by modern audio players:
+
+| Extension | Embedded Tag Format |
+| :--- | :--- |
+| `.flac`, `.ogg`, `.opus` | Vorbis Comments (`LYRICS`) |
+| `.mp3` | ID3v2 (USLT) |
+| `.m4a`, `.mp4` | MP4 ilst (`©lyr`) |
+| `.wav` | Standard ID3 fallback |
+
+## 📜 License
+
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. 
+
+You are free to use, modify, and distribute this software. However, any derivative works—including closed-source applications or cloud services utilizing this code—must also release their complete source code under the same AGPL-3.0 license.

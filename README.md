@@ -85,4 +85,4 @@ When `--embed` is used, `lyrsync-cli` safely writes to the exact metadata format
 
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. 
 
-You are free to use, modify, and distribute this software. However, any derivative works—including closed-source applications or cloud services utilizing this code—must also release their complete source code under the same AGPL-3.0 license.
+You are free to use, modify, and distribute this software. However, any derivative works including closed-source applications or cloud services utilizing this code must also release their complete source code under the same AGPL-3.0 license.

@@ -83,3 +83,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: staging/*
+          draft: false
+          make_latest: true

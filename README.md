@@ -7,13 +7,15 @@ A *blazingly fast*, zero friction Rust CLI to fetch, convert, and natively embed
 
 Whether you want to scan an entire music library to inject lyrics into FLAC metadata, or just convert a local Musixmatch JSON payload, `lyrsync-cli` handles the heavy lifting safely and automatically.
 
-## ⚡ Prerequisites
-
-For `--auto` and `--fetch`, `lyrsync-cli` uses ThetaDev's
-[musixmatch-inofficial](https://codeberg.org/ThetaDev/musixmatch-inofficial)
-API client directly through this crate.
-
 ## 🚀 Installation
+### 📦 Prebuilt
+
+**Note: macOS users have to compile the program themselves.**
+* **Windows / Linux:** None! Just download the prebuilt binary from the [releases](https://github.com/lunishworks/lyrsync-cli/releases) tab.
+* **macOS / Manual Compilation:** Rust & Cargo (if compiling from source)
+
+
+### 🏗️ Compilation
 
 Clone the repository and build the optimized release binary:
 

@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset_name: lyrsync-cli-linux.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_name: lyrsync-cli-windows.zip
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install MUSL Tools (Linux Only)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build Binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package Assets (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release/
+          Compress-Archive -Path lyrsync-cli.exe -DestinationPath ../../../${{ matrix.asset_name }}
+
+      - name: Package Assets (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cd target/${{ matrix.target }}/release/
+          tar -czf ../../../${{ matrix.asset_name }} lyrsync-cli
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  release:
+    name: Attach Files to Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lyrsync-cli-*
+          path: staging
+          merge-multiple: true
+
+      - name: Generate SHA-256 Checksums
+        run: |
+          cd staging
+          sha256sum * > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Attach Files
+        uses: softprops/action-gh-release@v2
+        with:
+          files: staging/*

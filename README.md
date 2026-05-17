@@ -3,18 +3,15 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Rust](https://img.shields.io/badge/rust-2026-orange.svg)](https://www.rust-lang.org)
 
-A lightning-fast, zero-friction Rust CLI to fetch, convert, and natively embed word-by-word synchronized eLRC lyrics directly into your local audio files. 
+A *blazingly fast*, zero friction Rust CLI to fetch, convert, and natively embed word-by-word synchronized eLRC lyrics directly into your local audio files. 
 
 Whether you want to scan an entire music library to inject lyrics into FLAC metadata, or just convert a local Musixmatch JSON payload, `lyrsync-cli` handles the heavy lifting safely and automatically.
 
 ## ⚡ Prerequisites
 
-To download lyrics directly from the web, `lyrsync-cli` relies on the excellent [musixmatch-cli](https://codeberg.org/ThetaDev/musixmatch-inofficial) backend by ThetaDev. 
-
-You must have it installed and available in your system path to use the `--auto` or `--fetch` flags:
-```bash
-cargo install musixmatch-cli
-```
+For `--auto` and `--fetch`, `lyrsync-cli` uses ThetaDev's
+[musixmatch-inofficial](https://codeberg.org/ThetaDev/musixmatch-inofficial)
+API client directly through this crate.
 
 ## 🚀 Installation
 
@@ -85,4 +82,4 @@ When `--embed` is used, `lyrsync-cli` safely writes to the exact metadata format
 
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. 
 
-You are free to use, modify, and distribute this software. However, any derivative works—including closed-source applications or cloud services utilizing this code—must also release their complete source code under the same AGPL-3.0 license.
+You are free to use, modify, and distribute this software. However, any derivative works including closed-source applications or cloud services utilizing this code must also release their complete source code under the same AGPL-3.0 license.

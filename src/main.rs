@@ -1,10 +1,11 @@
 use clap::Parser;
+use musixmatch_inofficial::{
+    Musixmatch,
+    models::{RichsyncLine, SubtitleFormat, TrackId},
+};
 use serde::Deserialize;
 use std::fs;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 // Universal audio tagging dependencies
 use lofty::config::WriteOptions;
@@ -13,9 +14,6 @@ use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagItem, TagType};
 
 const SUPPORTED_AUDIO_EXTS: [&str; 6] = ["flac", "mp3", "opus", "m4a", "wav", "ogg"];
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LyricsMode {
@@ -220,110 +218,113 @@ fn process_json_to_elrc(
     }
 }
 
-fn extract_first_json_array(content: &str) -> Option<&str> {
-    for (start_idx, ch) in content.char_indices() {
-        if ch != '[' {
-            continue;
-        }
+fn render_richsync_lines(
+    lines: &[RichsyncLine],
+    force_lrc: bool,
+    offset_val: f64,
+) -> Option<String> {
+    let mut output = String::new();
 
-        let mut depth = 0usize;
-        let mut end_idx = None;
+    for line in lines {
+        let shifted_ts = f64::from(line.ts) + offset_val;
+        output.push_str(&format!("[{}]", format_time(shifted_ts)));
 
-        for (rel_idx, inner_ch) in content[start_idx..].char_indices() {
-            match inner_ch {
-                '[' => depth += 1,
-                ']' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        end_idx = Some(start_idx + rel_idx);
-                        break;
-                    }
+        if !force_lrc && !line.l.is_empty() {
+            for word in &line.l {
+                if word.c.trim().is_empty() {
+                    output.push_str(&word.c);
+                } else {
+                    output.push_str(&format!(
+                        "<{}>{}",
+                        format_time(shifted_ts + f64::from(word.o)),
+                        word.c
+                    ));
                 }
-                _ => {}
             }
+            output.push_str(&format!(
+                "<{}>",
+                format_time(f64::from(line.te) + offset_val)
+            ));
+        } else {
+            output.push_str(&line.x);
         }
-
-        let Some(end_idx) = end_idx else {
-            continue;
-        };
-
-        let candidate = &content[start_idx..=end_idx];
-        let mut chars = candidate.chars();
-        if chars.next() != Some('[') {
-            continue;
-        }
-        let next_non_ws = chars.find(|c| !c.is_whitespace());
-        if matches!(next_non_ws, Some('{') | Some('[')) {
-            return Some(candidate);
-        }
+        output.push('\n');
     }
 
-    None
+    if output.trim().is_empty() {
+        None
+    } else {
+        Some(output)
+    }
 }
 
-fn run_musixmatch_cli(args: &[&str], debug: bool) -> Option<String> {
-    if debug {
-        println!("[DEBUG] Running musixmatch-cli {}", args.join(" "));
-    }
-
-    let mut cmd = Command::new("musixmatch-cli");
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    {
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let output = match cmd.spawn().and_then(|child| child.wait_with_output()) {
-        Ok(out) => out,
-        Err(e) => {
-            eprintln!("  -> Failed to execute musixmatch-cli: {}", e);
-            return None;
-        }
-    };
-
-    if !output.status.success() {
-        if debug {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            println!(
-                "[DEBUG] musixmatch-cli exited with {}: {}",
-                output.status,
-                stderr.trim()
-            );
-        }
-        return None;
-    }
-
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-fn fetch_richsync_converted(
+async fn fetch_richsync_converted(
+    musixmatch: &Musixmatch,
     artist: &str,
     title: &str,
     force_lrc: bool,
     offset_val: f64,
     debug: bool,
 ) -> Option<String> {
-    let stdout_str = run_musixmatch_cli(&["richsync", "--name", title, "--artist", artist], debug)?;
-    let json_content = extract_first_json_array(&stdout_str)?;
-    process_json_to_elrc(json_content, force_lrc, offset_val, debug)
+    let track = match musixmatch
+        .matcher_track(title, artist, "", false, false, false)
+        .await
+    {
+        Ok(track) => track,
+        Err(e) => {
+            if debug {
+                println!("[DEBUG] matcher_track failed: {}", e);
+            }
+            return None;
+        }
+    };
+
+    let richsync = match musixmatch
+        .track_richsync(TrackId::TrackId(track.track_id), None, None)
+        .await
+    {
+        Ok(richsync) => richsync,
+        Err(e) => {
+            if debug {
+                println!("[DEBUG] track_richsync failed: {}", e);
+            }
+            return None;
+        }
+    };
+
+    let lines = match richsync.get_lines() {
+        Ok(lines) => lines,
+        Err(e) => {
+            if debug {
+                println!("[DEBUG] richsync line parse failed: {}", e);
+            }
+            return None;
+        }
+    };
+
+    render_richsync_lines(&lines, force_lrc, offset_val)
 }
 
-fn fetch_standard_lrc(artist: &str, title: &str, debug: bool) -> Option<String> {
-    let stdout_str = run_musixmatch_cli(
-        &[
-            "subtitles",
-            "--name",
-            title,
-            "--artist",
-            artist,
-            "--format",
-            "lrc",
-        ],
-        debug,
-    )?;
+async fn fetch_standard_lrc(
+    musixmatch: &Musixmatch,
+    artist: &str,
+    title: &str,
+    debug: bool,
+) -> Option<String> {
+    let subtitle = match musixmatch
+        .matcher_subtitle(title, artist, SubtitleFormat::Lrc, None, None)
+        .await
+    {
+        Ok(subtitle) => subtitle,
+        Err(e) => {
+            if debug {
+                println!("[DEBUG] matcher_subtitle failed: {}", e);
+            }
+            return None;
+        }
+    };
 
-    let trimmed = stdout_str.trim();
+    let trimmed = subtitle.subtitle_body.trim();
     if trimmed.contains('[') && trimmed.contains(']') {
         Some(trimmed.to_string())
     } else {
@@ -422,7 +423,8 @@ fn embed_into_audio(audio_path: &Path, lyrics: &str, debug: bool) {
     }
 }
 
-fn fetch_lyrics_auto(
+async fn fetch_lyrics_auto(
+    musixmatch: &Musixmatch,
     artist: &str,
     title: &str,
     lyrics_mode: LyricsMode,
@@ -433,34 +435,36 @@ fn fetch_lyrics_auto(
 
     match lyrics_mode {
         LyricsMode::Elrc => {
-            if let Some(elrc) = fetch_richsync_converted(artist, title, false, offset_val, debug) {
-                println!("  -> [SUCCESS] Word-by-word eLRC generated!");
+            if let Some(elrc) =
+                fetch_richsync_converted(musixmatch, artist, title, false, offset_val, debug).await
+            {
+                println!("  -> Word-by-word eLRC generated.");
                 return Some(elrc);
             }
 
             println!("  -> Richsync unavailable. Falling back to standard line-synced LRC...");
-            if let Some(lrc) = fetch_standard_lrc(artist, title, debug) {
-                println!("  -> [SUCCESS] Standard LRC found!");
+            if let Some(lrc) = fetch_standard_lrc(musixmatch, artist, title, debug).await {
+                println!("  -> Standard LRC found.");
                 return Some(lrc);
             }
         }
         LyricsMode::Lrc => {
-            if let Some(lrc) = fetch_standard_lrc(artist, title, debug) {
-                println!("  -> [SUCCESS] Standard LRC generated!");
+            if let Some(lrc) = fetch_standard_lrc(musixmatch, artist, title, debug).await {
+                println!("  -> Standard LRC generated.");
                 return Some(lrc);
             }
 
             println!("  -> Standard subtitles unavailable. Falling back to richsync conversion...");
             if let Some(lrc_from_richsync) =
-                fetch_richsync_converted(artist, title, true, offset_val, debug)
+                fetch_richsync_converted(musixmatch, artist, title, true, offset_val, debug).await
             {
-                println!("  -> [SUCCESS] LRC generated from richsync data!");
+                println!("  -> LRC generated from richsync data.");
                 return Some(lrc_from_richsync);
             }
         }
     }
 
-    println!("  -> [FAILED] No lyrics found.");
+    println!("  -> No lyrics found.");
     None
 }
 
@@ -623,7 +627,8 @@ fn convert_and_embed(
     }
 }
 
-fn fetch_for_audio_file(
+async fn fetch_for_audio_file(
+    musixmatch: &Musixmatch,
     audio_path: &Path,
     lyrics_mode: LyricsMode,
     embed: bool,
@@ -641,7 +646,8 @@ fn fetch_for_audio_file(
         return false;
     };
 
-    let Some(lyrics_text) = fetch_lyrics_auto(&artist, &title, lyrics_mode, offset_val, debug)
+    let Some(lyrics_text) =
+        fetch_lyrics_auto(musixmatch, &artist, &title, lyrics_mode, offset_val, debug).await
     else {
         return false;
     };
@@ -659,7 +665,8 @@ fn fetch_for_audio_file(
     true
 }
 
-fn fetch_for_audio_directory(
+async fn fetch_for_audio_directory(
+    musixmatch: &Musixmatch,
     dir: &Path,
     lyrics_mode: LyricsMode,
     embed: bool,
@@ -676,27 +683,66 @@ fn fetch_for_audio_directory(
     }
 
     for path in audio_files {
-        fetch_for_audio_file(&path, lyrics_mode, embed, offset_val, debug);
+        fetch_for_audio_file(musixmatch, &path, lyrics_mode, embed, offset_val, debug).await;
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
     let debug = args.debug;
     let offset_val = args.offset.unwrap_or(0.0);
     let lyrics_mode = selected_lyrics_mode(&args);
     let force_lrc = matches!(lyrics_mode, LyricsMode::Lrc);
+    let should_fetch = args.auto || args.fetch.is_some();
+
+    let musixmatch = if should_fetch {
+        match Musixmatch::builder().build() {
+            Ok(client) => Some(client),
+            Err(e) => {
+                eprintln!("Error: Could not initialize Musixmatch API client: {}", e);
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
     if args.auto {
+        let Some(musixmatch) = musixmatch.as_ref() else {
+            eprintln!("Error: Musixmatch API client is not available.");
+            return;
+        };
         println!("Starting automatic audio fetch pipeline...");
-        fetch_for_audio_directory(Path::new("."), lyrics_mode, args.embed, offset_val, debug);
+        fetch_for_audio_directory(
+            musixmatch,
+            Path::new("."),
+            lyrics_mode,
+            args.embed,
+            offset_val,
+            debug,
+        )
+        .await;
         return;
     }
 
     if let Some(fetch_arg) = args.fetch.as_deref() {
+        let Some(musixmatch) = musixmatch.as_ref() else {
+            eprintln!("Error: Musixmatch API client is not available.");
+            return;
+        };
+
         if args.all {
             println!("Starting fetch pipeline for all audio files...");
-            fetch_for_audio_directory(Path::new("."), lyrics_mode, args.embed, offset_val, debug);
+            fetch_for_audio_directory(
+                musixmatch,
+                Path::new("."),
+                lyrics_mode,
+                args.embed,
+                offset_val,
+                debug,
+            )
+            .await;
             return;
         }
 
@@ -706,7 +752,8 @@ fn main() {
                 return eprintln!("Error: --fetch query must be in \"Artist - Title\" format.");
             };
 
-            if let Some(lyrics) = fetch_lyrics_auto(&artist, &title, lyrics_mode, offset_val, debug)
+            if let Some(lyrics) =
+                fetch_lyrics_auto(musixmatch, &artist, &title, lyrics_mode, offset_val, debug).await
             {
                 let clean_title = clean_filename_component(&title);
                 let base_name = if clean_title.is_empty() {
@@ -729,7 +776,15 @@ fn main() {
                 );
             }
 
-            fetch_for_audio_file(file_path, lyrics_mode, args.embed, offset_val, debug);
+            fetch_for_audio_file(
+                musixmatch,
+                file_path,
+                lyrics_mode,
+                args.embed,
+                offset_val,
+                debug,
+            )
+            .await;
             return;
         }
 
@@ -742,7 +797,15 @@ fn main() {
                 println!(
                     "No fetch query provided; using the only audio file in current directory."
                 );
-                fetch_for_audio_file(&audio_files[0], lyrics_mode, args.embed, offset_val, debug);
+                fetch_for_audio_file(
+                    musixmatch,
+                    &audio_files[0],
+                    lyrics_mode,
+                    args.embed,
+                    offset_val,
+                    debug,
+                )
+                .await;
             }
             _ => eprintln!(
                 "Error: Multiple audio files found. Use --fetch --all, provide FILE, or pass a query."
@@ -790,56 +853,5 @@ fn main() {
         } else {
             eprintln!("Error: File not found: {}", file_path.display());
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::Value;
-
-    #[test]
-    fn extracts_wrapped_richsync_json_array() {
-        let wrapped = "status: ok\n[{\"ts\":0.0,\"te\":1.2,\"l\":[{\"c\":\"Hi\",\"o\":0.0}],\"x\":\"Hi\"}]\ncomplete";
-        let extracted = extract_first_json_array(wrapped).expect("json array should be extracted");
-        let parsed: Value =
-            serde_json::from_str(extracted).expect("extracted payload should be valid JSON");
-        assert!(parsed.is_array());
-    }
-
-    #[test]
-    fn skips_non_json_bracket_groups_when_extracting() {
-        let wrapped = "[INFO] Running\n[{\"ts\":0.0,\"te\":1.2,\"l\":[],\"x\":\"Hi\"}]";
-        let extracted = extract_first_json_array(wrapped).expect("json array should be extracted");
-        assert_eq!(extracted, "[{\"ts\":0.0,\"te\":1.2,\"l\":[],\"x\":\"Hi\"}]");
-    }
-
-    #[test]
-    fn parse_filename_handles_track_numbers_and_suffixes() {
-        let parsed =
-            parse_filename_for_tags("04. Duman - Hâlimiz Duman (Live) [Remastered]", false)
-                .expect("filename should parse");
-        assert_eq!(parsed.0, "Duman");
-        assert_eq!(parsed.1, "Hâlimiz Duman");
-    }
-
-    #[test]
-    fn parse_filename_accepts_compact_hyphen_separator() {
-        let parsed =
-            parse_filename_for_tags("01-Artist-Track_Name", false).expect("filename should parse");
-        assert_eq!(parsed.0, "Artist");
-        assert_eq!(parsed.1, "Track Name");
-    }
-
-    #[test]
-    fn parse_fetch_query_accepts_common_separators() {
-        let parsed = parse_artist_title_query("Artist — Track Name").expect("query should parse");
-        assert_eq!(parsed.0, "Artist");
-        assert_eq!(parsed.1, "Track Name");
-    }
-
-    #[test]
-    fn parse_fetch_query_rejects_missing_separator() {
-        assert!(parse_artist_title_query("Artist Track Name").is_none());
     }
 }

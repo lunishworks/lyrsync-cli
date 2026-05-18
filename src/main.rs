@@ -4,7 +4,7 @@ use musixmatch_inofficial::{
     Musixmatch,
 };
 use serde::Deserialize;
-use std::fmt::Write as _; // Required so we can use the write! macro on Strings
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -51,6 +51,10 @@ struct Args {
     #[arg(short = 'r', long)]
     recursive: bool,
 
+    /// Strip embedded lyrics from audio files
+    #[arg(long)]
+    remove: bool,
+
     #[arg(long)]
     debug: bool,
 
@@ -83,6 +87,8 @@ fn selected_lyrics_mode(args: &Args) -> LyricsMode {
 }
 
 fn format_time(seconds: f64) -> String {
+    // LRC format strictly expects [mm:ss.xx]. 
+    // Converting everything to total hundredths of a second first prevents weird floating point rounding bugs.
     let safe_seconds = seconds.max(0.0);
     let total_hundredths = (safe_seconds * 100.0).round() as u64;
     
@@ -94,6 +100,8 @@ fn format_time(seconds: f64) -> String {
 }
 
 fn normalize_string(input: &str) -> String {
+    // Brute force weird accents and special characters down to plain ASCII.
+    // If we don't do this, our sloppy local filename matching will completely fail on foreign song titles.
     input
         .to_lowercase()
         .chars()
@@ -119,6 +127,8 @@ fn is_supported_audio_file(path: &Path) -> bool {
 }
 
 fn strip_bracketed_sections(input: &str) -> String {
+    // Strips out junk like "(Acoustic Version)" or "[Remastered 2011]" 
+    // If we leave these in, the Musixmatch API search will usually return zero results.
     let mut output = String::with_capacity(input.len());
     let mut paren_depth = 0usize;
     let mut square_depth = 0usize;
@@ -148,6 +158,7 @@ fn clean_filename_component(input: &str) -> String {
 
 fn parse_artist_title_query(input: &str) -> Option<(String, String)> {
     let trimmed = input.trim();
+    // Try the most common dash types until one of them successfully splits the string
     let (raw_artist, raw_title) = [" - ", " – ", " — ", "-"]
         .iter()
         .find_map(|sep| trimmed.split_once(sep))?;
@@ -273,6 +284,7 @@ fn embed_into_audio(audio_path: &Path, lyrics: &str, debug: bool, log: &mut Stri
         return;
     }
 
+    // Nuke existing lyric tags first. Lofty can act weird and write duplicate tags if we don't wipe the slate clean.
     for existing_tag_type in [TagType::Id3v2, TagType::VorbisComments, TagType::Mp4Ilst] {
         if let Some(existing_tag) = tagged_file.tag_mut(existing_tag_type) {
             existing_tag.remove_key(&ItemKey::Lyrics);
@@ -292,6 +304,38 @@ fn embed_into_audio(audio_path: &Path, lyrics: &str, debug: bool, log: &mut Stri
         writeln!(log, "  -> Failed to save metadata: {}. Make sure the file isn't open elsewhere!", e).unwrap();
     } else {
         writeln!(log, "  -> Successfully embedded lyrics into metadata!").unwrap();
+    }
+}
+
+// Completely purges lyrics from an audio file without touching the actual audio data
+fn remove_lyrics_from_audio(audio_path: &Path, debug: bool, log: &mut String) {
+    let Ok(mut tagged_file) = Probe::open(audio_path).and_then(|p| p.read()) else {
+        writeln!(log, "  -> Failed to open audio file {}", audio_path.display()).unwrap();
+        return;
+    };
+
+    let mut removed = false;
+    
+    // Lofty is strict and won't let us just loop over all tags mutably.
+    // We specifically ask for the exact tag types we want to edit.
+    for tag_type in [TagType::Id3v2, TagType::VorbisComments, TagType::Mp4Ilst] {
+        if let Some(tag) = tagged_file.tag_mut(tag_type) {
+            // .remove_key() returns () in this crate version so we call it on its own line
+            tag.remove_key(&ItemKey::Lyrics);
+            if debug { writeln!(log, "[DEBUG] Stripped lyrics key from {:?}", tag_type).unwrap(); }
+            removed = true;
+        }
+    }
+
+    // Even if it just cleaned an empty tag we still save the file to be safe
+    if removed {
+        if let Err(e) = tagged_file.save_to_path(audio_path, WriteOptions::default()) {
+            writeln!(log, "  -> Failed to save metadata: {}", e).unwrap();
+        } else {
+            writeln!(log, "  -> Successfully purged embedded lyrics!").unwrap();
+        }
+    } else {
+        writeln!(log, "  -> No metadata tags found to clean.").unwrap();
     }
 }
 
@@ -341,6 +385,7 @@ fn parse_filename_for_tags(stem: &str, debug: bool, log: &mut String) -> Option<
 }
 
 fn get_artist_and_title(audio_path: &Path, debug: bool, log: &mut String) -> Option<(String, String)> {
+    // Attempt to pull real metadata tags first
     if let Ok(tagged_file) = Probe::open(audio_path).and_then(|p| p.read()) {
         if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
             if let (Some(a), Some(t)) = (tag.artist().map(|s| s.into_owned()), tag.title().map(|s| s.into_owned())) {
@@ -349,13 +394,15 @@ fn get_artist_and_title(audio_path: &Path, debug: bool, log: &mut String) -> Opt
         }
     }
 
+    // Fall back to blindly splitting the filename if metadata is missing
     let stem = audio_path.file_stem().unwrap_or_default().to_string_lossy();
     if debug { writeln!(log, "[DEBUG] Metadata missing, falling back to filename: '{}'", stem).unwrap(); }
     parse_filename_for_tags(&stem, debug, log)
 }
 
-// We use a classic stack loop here so we don't blow up the call stack with real recursion, 
-// and we don't need to add the `walkdir` crate just for a simple folder scan
+// We use a classic vector stack loop here to crawl directories.
+// This prevents us from blowing up the call stack with actual recursion, 
+// and saves us from needing to add the heavy `walkdir` crate just for a simple folder scan.
 fn collect_files<F>(dir: &Path, recursive: bool, filter: F) -> Vec<PathBuf> 
 where F: Fn(&Path) -> bool 
 {
@@ -435,21 +482,55 @@ fn convert_and_embed(
         write_lyrics_outputs(&output, base_name, embed, current_dir, None, recursive, debug, &mut log);
     }
     
+    print!("{}", log); // Atomic print to avoid terminal spaghetti
+}
+
+async fn remove_for_audio_file(audio_path: PathBuf, debug: bool) {
+    let mut log = String::new();
+    writeln!(&mut log, "--------------------------------------------------").unwrap();
+    writeln!(&mut log, "Processing Audio File: {}", audio_path.display()).unwrap();
+
+    remove_lyrics_from_audio(&audio_path, debug, &mut log);
+    
     print!("{}", log); // Atomic print
+}
+
+async fn remove_for_audio_directory(dir: &Path, recursive: bool, debug: bool) {
+    let audio_files = collect_audio_files(dir, recursive);
+    if audio_files.is_empty() {
+        eprintln!("Error: No supported audio files found in {}.", dir.display());
+        return;
+    }
+
+    let mut handles = Vec::new();
+    // 50 is a safe limit for local file editing. If we uncap this, 
+    // the OS will eventually throw a "Too many open files" error on massive directories.
+    let semaphore = Arc::new(Semaphore::new(50));
+
+    for path in audio_files {
+        let sem_clone = Arc::clone(&semaphore);
+        handles.push(tokio::spawn(async move {
+            let _permit = sem_clone.acquire().await.unwrap();
+            remove_for_audio_file(path, debug).await;
+        }));
+    }
+
+    for handle in handles {
+        let _ = handle.await;
+    }
 }
 
 async fn fetch_for_audio_file(
     musixmatch: Arc<Musixmatch>, audio_path: PathBuf, lyrics_mode: LyricsMode, embed: bool, offset_val: f64, debug: bool, recursive: bool
 ) {
-    // We build the entire output text for this specific file in memory first.
-    // This stops threads from printing over each other in the terminal.
+    // Build the log in memory first so thread outputs don't turn into a scrambled mess in the terminal
     let mut log = String::new();
     writeln!(&mut log, "--------------------------------------------------").unwrap();
     writeln!(&mut log, "Processing Audio File: {}", audio_path.display()).unwrap();
 
     let Some((artist, title)) = get_artist_and_title(&audio_path, debug, &mut log) else {
         writeln!(&mut log, "  -> Could not determine artist/title for {}", audio_path.display()).unwrap();
-        print!("{}", log); // Dump the buffer and exit thread
+        print!("{}", log); 
         return;
     };
 
@@ -474,8 +555,8 @@ async fn fetch_for_audio_directory(
         return;
     }
 
-    // A semaphore limits exactly how many tasks can hit the Musixmatch API at the exact same time.
-    // 5 is a very safe limit to prevent getting IP banned for spamming requests.
+    // Semaphore limits how many tasks can hit the Musixmatch API at the exact same time.
+    // 5 is a very safe limit to prevent getting temporarily IP banned for spamming requests.
     let semaphore = Arc::new(Semaphore::new(5));
     let mut handles = Vec::new();
 
@@ -484,13 +565,11 @@ async fn fetch_for_audio_directory(
         let sem_clone = Arc::clone(&semaphore);
         
         handles.push(tokio::spawn(async move {
-            // Thread waits here in line until the semaphore has an open slot
             let _permit = sem_clone.acquire().await.unwrap(); 
             fetch_for_audio_file(mx_clone, path, lyrics_mode, embed, offset_val, debug, recursive).await;
         }));
     }
 
-    // Wait for all the threads to actually finish before we exit the program
     for handle in handles {
         let _ = handle.await;
     }
@@ -502,12 +581,29 @@ async fn main() {
     let offset_val = args.offset.unwrap_or(0.0);
     let lyrics_mode = selected_lyrics_mode(&args);
     let force_lrc = matches!(lyrics_mode, LyricsMode::Lrc);
-    let should_fetch = args.auto || args.fetch.is_some();
     let recursive = args.recursive;
 
+    // Intercept everything and run the purge pipeline if --remove is passed
+    if args.remove {
+        if args.auto || args.all {
+            println!("Starting automatic lyric removal pipeline...");
+            remove_for_audio_directory(Path::new("."), recursive, args.debug).await;
+        } else if let Some(file_path) = args.file {
+            if file_path.exists() && is_supported_audio_file(&file_path) {
+                remove_for_audio_file(file_path, args.debug).await;
+            } else {
+                eprintln!("Error: FILE must be a valid audio file when used with --remove.");
+            }
+        } else {
+            eprintln!("Error: Use --remove with --auto, --all, or provide a specific FILE.");
+        }
+        return;
+    }
+
+    let should_fetch = args.auto || args.fetch.is_some();
     let musixmatch = if should_fetch {
         match Musixmatch::builder().build() {
-            Ok(client) => Some(Arc::new(client)), // Wrapped in Arc so threads can safely share the client
+            Ok(client) => Some(Arc::new(client)), 
             Err(e) => {
                 eprintln!("Error: Could not initialize Musixmatch client: {}", e);
                 return;
